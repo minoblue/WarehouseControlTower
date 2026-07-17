@@ -1,4 +1,4 @@
-FROM node:22-alpine AS base
+FROM node:26-alpine AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 RUN corepack enable
@@ -22,7 +22,7 @@ RUN pnpm db:generate \
     && pnpm --filter "@warehouse/${APP_NAME}"... clean \
     && pnpm --filter "@warehouse/${APP_NAME}"... build
 
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 ARG APP_NAME
 ENV NODE_ENV=production
 ENV APP_NAME=$APP_NAME
