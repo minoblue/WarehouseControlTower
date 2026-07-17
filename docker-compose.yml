@@ -1,0 +1,181 @@
+name: warehouse-control-tower
+
+x-app-environment: &app-environment
+  NODE_ENV: development
+  APP_VERSION: ${APP_VERSION:-0.1.0}
+  GIT_SHA: ${GIT_SHA:-local}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-warehouse}?schema=public
+  AWS_REGION: ${AWS_REGION:-us-east-1}
+  AWS_ENDPOINT_URL: http://localstack:4566
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  EVENT_BUS_NAME: ${EVENT_BUS_NAME:-warehouse-events}
+  ORDER_QUEUE_NAME: ${ORDER_QUEUE_NAME:-order-processing}
+  ORDER_DLQ_NAME: ${ORDER_DLQ_NAME:-order-processing-dlq}
+  ORDER_QUEUE_URL: http://localstack:4566/000000000000/${ORDER_QUEUE_NAME:-order-processing}
+  ORDER_DLQ_URL: http://localstack:4566/000000000000/${ORDER_DLQ_NAME:-order-processing-dlq}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-warehouse}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-warehouse}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  localstack:
+    image: localstack/localstack:4.4
+    environment:
+      SERVICES: sqs,events
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      EVENT_BUS_NAME: ${EVENT_BUS_NAME:-warehouse-events}
+      ORDER_QUEUE_NAME: ${ORDER_QUEUE_NAME:-order-processing}
+      ORDER_DLQ_NAME: ${ORDER_DLQ_NAME:-order-processing-dlq}
+      SQS_MAX_RECEIVE_COUNT: ${SQS_MAX_RECEIVE_COUNT:-3}
+      SQS_VISIBILITY_TIMEOUT_SECONDS: ${SQS_VISIBILITY_TIMEOUT_SECONDS:-30}
+      DEBUG: ${LOCALSTACK_DEBUG:-0}
+    ports:
+      - '4566:4566'
+    volumes:
+      - ./infrastructure/localstack/init:/etc/localstack/init/ready.d:ro
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:4566/_localstack/health']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: api
+    environment:
+      <<: *app-environment
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:-LocalAdmin123!}
+      DEMO_SUPPORT_PASSWORD: ${DEMO_SUPPORT_PASSWORD:-LocalSupport123!}
+      DEMO_OPERATIONS_PASSWORD: ${DEMO_OPERATIONS_PASSWORD:-LocalOperations123!}
+    command:
+      [
+        'sh',
+        '-c',
+        './node_modules/.bin/prisma migrate deploy && ./node_modules/.bin/prisma db seed',
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  mock-carrier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: mock-carrier
+    environment:
+      NODE_ENV: development
+      MOCK_CARRIER_PORT: 3002
+      MOCK_CARRIER_ADMIN_KEY: ${MOCK_CARRIER_ADMIN_KEY:-local-mock-carrier-control-key}
+    ports:
+      - '3002:3002'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:3002/health/live']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: api
+    environment:
+      <<: *app-environment
+      API_PORT: 3000
+      WEB_ORIGIN: http://localhost:8080
+      OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
+      JWT_ISSUER: ${JWT_ISSUER:-warehouse-control-tower}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-warehouse-control-tower-web}
+      JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-900}
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-before-use-32-chars}
+    ports:
+      - '3000:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:3000/api/health/live']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: worker
+    environment:
+      <<: *app-environment
+      WORKER_PORT: 3001
+      CARRIER_BASE_URL: http://mock-carrier:3002
+      CARRIER_TIMEOUT_MS: ${CARRIER_TIMEOUT_MS:-3000}
+      SQS_WAIT_TIME_SECONDS: ${SQS_WAIT_TIME_SECONDS:-20}
+      SQS_VISIBILITY_TIMEOUT_SECONDS: ${SQS_VISIBILITY_TIMEOUT_SECONDS:-30}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+    ports:
+      - '3001:3001'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+      mock-carrier:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:3001/health/live']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_API_URL: http://localhost:3000/api
+        VITE_SOCKET_URL: http://localhost:3000
+    ports:
+      - '8080:8080'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  localstack-data:
