@@ -14,7 +14,7 @@
     "clean": "rimraf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@aws-sdk/client-sqs": "^3.1086.0",
+    "@aws-sdk/client-sqs": "^3.1095.0",
     "@nestjs/common": "^11.1.28",
     "@nestjs/core": "^11.1.28",
     "@nestjs/platform-express": "^11.1.28",
