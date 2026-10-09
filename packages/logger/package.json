@@ -20,6 +20,6 @@
     "clean": "rimraf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "pino": "^10.3.1"
+    "pino": "^10.4.0"
   }
 }
